@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RFD Spot Bot Running"
+    return "RFD Early Pump Spot Bot Running"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -44,8 +44,9 @@ SCAN_INTERVAL = 300
 
 TOP_CMC_LIMIT = 1000
 
-MIN_VOLUME_USDT = 500000
+MIN_VOLUME_USDT = 200000
 MAX_SIGNALS_PER_RUN = 5
+MIN_CONFIDENCE = 75
 
 sent_signals = set()
 
@@ -113,7 +114,6 @@ def get_cmc_top_symbols():
                 symbols.append(symbol.upper())
 
         print(f"CMC symbols loaded: {len(symbols)}")
-
         return symbols
 
     except Exception as e:
@@ -121,7 +121,7 @@ def get_cmc_top_symbols():
         return []
 
 # =========================
-# OKX SPOT INSTRUMENTS
+# OKX SPOT PAIRS
 # =========================
 
 def get_okx_spot_pairs():
@@ -154,7 +154,6 @@ def get_okx_spot_pairs():
                 pairs[base_ccy.upper()] = inst_id
 
         print(f"OKX Spot USDT pairs loaded: {len(pairs)}")
-
         return pairs
 
     except Exception as e:
@@ -176,7 +175,6 @@ def build_watchlist():
             watchlist.append(okx_pairs[symbol])
 
     print(f"Final OKX watchlist: {len(watchlist)}")
-
     return watchlist
 
 # =========================
@@ -234,7 +232,7 @@ def get_okx_candles(inst_id):
         return None
 
 # =========================
-# ANALYZE SYMBOL
+# ANALYZE EARLY PUMP
 # =========================
 
 def analyze_symbol(inst_id):
@@ -248,15 +246,32 @@ def analyze_symbol(inst_id):
     low = df["low"]
     volume = df["volume"]
 
+    # EMA
     df["ema20"] = ta.trend.EMAIndicator(close, window=20).ema_indicator()
     df["ema50"] = ta.trend.EMAIndicator(close, window=50).ema_indicator()
+    df["ema100"] = ta.trend.EMAIndicator(close, window=100).ema_indicator()
 
+    # RSI
     df["rsi"] = ta.momentum.RSIIndicator(close, window=14).rsi()
 
+    # STOCH RSI
+    stoch = ta.momentum.StochRSIIndicator(
+        close=close,
+        window=14,
+        smooth1=3,
+        smooth2=3
+    )
+
+    df["stoch_k"] = stoch.stochrsi_k() * 100
+    df["stoch_d"] = stoch.stochrsi_d() * 100
+
+    # MACD
     macd = ta.trend.MACD(close)
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
 
+    # ATR
     atr = ta.volatility.AverageTrueRange(
         high=high,
         low=low,
@@ -265,56 +280,119 @@ def analyze_symbol(inst_id):
     )
 
     df["atr"] = atr.average_true_range()
+
+    # VOLUME
     df["volume_ma"] = volume.rolling(20).mean()
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
 
     price = last["close"]
 
-    trend_up = last["ema20"] > last["ema50"]
+    # =========================
+    # EARLY PUMP CONDITIONS
+    # =========================
 
-    rsi_good = 45 <= last["rsi"] <= 68
-
-    macd_cross = (
-        last["macd"] > last["macd_signal"]
-        and prev["macd"] <= prev["macd_signal"]
+    stoch_oversold_reversal = (
+        prev["stoch_k"] < 25
+        and last["stoch_k"] > prev["stoch_k"]
+        and last["stoch_k"] > last["stoch_d"]
     )
 
-    volume_good = last["volume"] > last["volume_ma"]
+    macd_early_reversal = (
+        last["macd_hist"] > prev["macd_hist"]
+        and prev["macd_hist"] > prev2["macd_hist"]
+    )
 
-    liquidity_good = last["volume_quote"] >= MIN_VOLUME_USDT
+    rsi_recovery = (
+        last["rsi"] > prev["rsi"]
+        and 35 <= last["rsi"] <= 62
+    )
 
-    if trend_up and rsi_good and macd_cross and volume_good and liquidity_good:
+    volume_building = (
+        last["volume"] >= last["volume_ma"] * 0.8
+    )
+
+    green_candle = (
+        last["close"] > last["open"]
+    )
+
+    near_bottom = (
+        price <= df["low"].tail(40).min() * 1.12
+    )
+
+    trend_not_dead = (
+        price > last["ema100"] * 0.92
+    )
+
+    liquidity_good = (
+        last["volume_quote"] >= MIN_VOLUME_USDT
+    )
+
+    candle_strength = (
+        (last["close"] - last["open"]) > 0
+        and (last["close"] - last["open"]) >= (last["high"] - last["low"]) * 0.35
+    )
+
+    # =========================
+    # CONFIDENCE SCORE
+    # =========================
+
+    confidence = 0
+
+    if stoch_oversold_reversal:
+        confidence += 25
+
+    if macd_early_reversal:
+        confidence += 20
+
+    if rsi_recovery:
+        confidence += 15
+
+    if volume_building:
+        confidence += 15
+
+    if green_candle:
+        confidence += 10
+
+    if near_bottom:
+        confidence += 10
+
+    if trend_not_dead:
+        confidence += 5
+
+    if liquidity_good:
+        confidence += 10
+
+    if candle_strength:
+        confidence += 10
+
+    early_pump_signal = (
+        stoch_oversold_reversal
+        and macd_early_reversal
+        and rsi_recovery
+        and volume_building
+        and green_candle
+        and near_bottom
+        and trend_not_dead
+        and liquidity_good
+        and confidence >= MIN_CONFIDENCE
+    )
+
+    if early_pump_signal:
         atr_value = last["atr"]
 
-        entry_low = price * 0.995
-        entry_high = price * 1.005
+        entry_low = price * 0.997
+        entry_high = price * 1.006
 
-        stop_loss = price - (atr_value * 1.8)
+        stop_loss = price - (atr_value * 1.6)
 
         tp1 = price + (atr_value * 1.2)
         tp2 = price + (atr_value * 2.0)
         tp3 = price + (atr_value * 2.8)
         tp4 = price + (atr_value * 3.6)
         tp5 = price + (atr_value * 4.5)
-
-        confidence = 0
-
-        if trend_up:
-            confidence += 25
-
-        if rsi_good:
-            confidence += 20
-
-        if macd_cross:
-            confidence += 25
-
-        if volume_good:
-            confidence += 20
-
-        if liquidity_good:
-            confidence += 10
 
         return {
             "symbol": inst_id,
@@ -323,7 +401,11 @@ def analyze_symbol(inst_id):
             "entry_high": entry_high,
             "stop_loss": stop_loss,
             "tps": [tp1, tp2, tp3, tp4, tp5],
-            "confidence": confidence
+            "confidence": min(confidence, 100),
+            "rsi": last["rsi"],
+            "stoch_k": last["stoch_k"],
+            "macd_hist": last["macd_hist"],
+            "volume_quote": last["volume_quote"]
         }
 
     return None
@@ -342,9 +424,9 @@ def format_signal(signal):
     message = f"""
 🔥 *RFD Indicator*
 
-⏰ {TIMEFRAME} Timeframe
+🚀 *EARLY SPOT LONG*
 
-✅ *SPOT LONG*
+⏰ {TIMEFRAME} Timeframe
 
 #{symbol}
 
@@ -361,6 +443,11 @@ to
 
 📊 *Confidence*
 {signal["confidence"]}%
+
+📈 *Signal Data*
+RSI: {signal["rsi"]:.2f}
+Stoch RSI: {signal["stoch_k"]:.2f}
+Volume USDT: {signal["volume_quote"]:.2f}
 """
 
     return message.strip()
@@ -370,10 +457,9 @@ to
 # =========================
 
 def run_bot():
-    print("RFD Spot Bot Started")
+    print("RFD Early Pump Spot Bot Started")
 
-    # الرسالة الترحيبية بعد حذف الجزء المطلوب
-    send_telegram("🔥 RFD Spot Bot Started")
+    send_telegram("🔥 RFD Early Pump Spot Bot Started")
 
     while True:
         try:
@@ -399,7 +485,6 @@ def run_bot():
 
                         if signal_id not in sent_signals:
                             message = format_signal(signal)
-
                             send_telegram(message)
 
                             sent_signals.add(signal_id)
