@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import json
 import requests
 import pandas as pd
 from flask import Flask
@@ -17,6 +18,11 @@ MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "50"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
 MAX_SYMBOLS_PER_EXCHANGE = int(os.getenv("MAX_SYMBOLS_PER_EXCHANGE", "500"))
+
+# Learning / performance tracking
+LEARNING_FILE = os.getenv("LEARNING_FILE", "signals_learning.json")
+LEARNING_REPORT_EVERY = int(os.getenv("LEARNING_REPORT_EVERY", "6"))  # كل 6 جولات تقريباً
+MIN_SAMPLE_FOR_ADVICE = int(os.getenv("MIN_SAMPLE_FOR_ADVICE", "10"))
 
 ENABLED_EXCHANGES = ["GATE", "BITGET", "OKX"]
 
@@ -111,6 +117,153 @@ def normalize_ohlcv(rows):
         return None
 
     return df
+
+
+# =========================================================
+# Learning System
+# =========================================================
+
+scan_rounds = 0
+
+def load_learning_data():
+    try:
+        if os.path.exists(LEARNING_FILE):
+            with open(LEARNING_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print("Learning load error:", e)
+
+    return {
+        "signals": [],
+        "summary": {
+            "total_signals": 0,
+            "target1_hits": 0,
+            "target2_hits": 0,
+            "target3_hits": 0,
+            "target4_hits": 0,
+            "target5_hits": 0,
+            "stop_hits": 0
+        }
+    }
+
+def save_learning_data(data):
+    try:
+        with open(LEARNING_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("Learning save error:", e)
+
+def learning_register_signal(exchange, display, entry, confidence, volume):
+    data = load_learning_data()
+    data["summary"]["total_signals"] += 1
+
+    base = get_base_from_display(display)
+
+    data["signals"].append({
+        "base": base,
+        "exchange": exchange,
+        "display": display,
+        "entry": entry,
+        "confidence": confidence,
+        "volume": volume,
+        "created_at": int(time.time()),
+        "target1": False,
+        "target2": False,
+        "target3": False,
+        "target4": False,
+        "target5": False,
+        "stop_loss": False
+    })
+
+    # احتفظ بآخر 500 إشارة فقط حتى لا يكبر الملف
+    data["signals"] = data["signals"][-500:]
+    save_learning_data(data)
+
+def learning_mark_target(display, target_no):
+    data = load_learning_data()
+    base = get_base_from_display(display)
+    key = f"target{target_no}"
+
+    data["summary"][f"target{target_no}_hits"] += 1
+
+    for sig in reversed(data["signals"]):
+        if sig.get("base") == base and not sig.get(key):
+            sig[key] = True
+            break
+
+    save_learning_data(data)
+
+def learning_mark_stop(display):
+    data = load_learning_data()
+    base = get_base_from_display(display)
+
+    data["summary"]["stop_hits"] += 1
+
+    for sig in reversed(data["signals"]):
+        if sig.get("base") == base and not sig.get("stop_loss"):
+            sig["stop_loss"] = True
+            break
+
+    save_learning_data(data)
+
+def build_learning_advice():
+    data = load_learning_data()
+    summary = data.get("summary", {})
+
+    total = summary.get("total_signals", 0)
+    t1 = summary.get("target1_hits", 0)
+    t2 = summary.get("target2_hits", 0)
+    stops = summary.get("stop_hits", 0)
+
+    if total < MIN_SAMPLE_FOR_ADVICE:
+        return f"""
+🧠 تقرير التعلم الذاتي
+
+عدد الإشارات المسجلة: {total}
+
+لا توجد بيانات كافية للحكم الآن.
+نحتاج على الأقل {MIN_SAMPLE_FOR_ADVICE} إشارات حتى نعطي توصية دقيقة.
+""".strip()
+
+    t1_rate = (t1 / total) * 100 if total else 0
+    t2_rate = (t2 / total) * 100 if total else 0
+    stop_rate = (stops / total) * 100 if total else 0
+
+    advice = []
+
+    if stop_rate > 35:
+        advice.append("⚠️ نسبة وقف الخسارة مرتفعة: شدد شروط الدخول.")
+        advice.append("اقتراح: ارفع MIN_CONFIDENCE إلى 60 أو 70.")
+        advice.append("اقتراح: اجعل Volume على 5M أعلى من المتوسط بدل 0.80.")
+
+    if t1_rate < 35:
+        advice.append("⚠️ نسبة تحقيق الهدف الأول ضعيفة.")
+        advice.append("اقتراح: لا تدخل إلا إذا كان 15M أقوى.")
+        advice.append("اقتراح: اجعل Stoch RSI على 15M أقل من 80 بدل 90.")
+
+    if t1_rate >= 50 and stop_rate <= 25:
+        advice.append("✅ الأداء جيد مبدئياً.")
+        advice.append("اقتراح: ارفع الهدف الأول تدريجياً أو ارفع MIN_CONFIDENCE إلى 60.")
+
+    if t2_rate < 20 and t1_rate >= 45:
+        advice.append("ℹ️ الهدف الأول جيد لكن الهدف الثاني ضعيف.")
+        advice.append("اقتراح: خذ جزء من الربح عند الهدف الأول ولا تنتظر الهدف الثاني دائماً.")
+
+    if not advice:
+        advice.append("الأداء متوسط. استمر بجمع البيانات قبل تعديل الشروط.")
+
+    return f"""
+🧠 *تقرير التعلم الذاتي للبوت*
+
+📊 إجمالي الإشارات: `{total}`
+🎯 تحقق الهدف 1: `{t1}` | `{t1_rate:.1f}%`
+🎯 تحقق الهدف 2: `{t2}` | `{t2_rate:.1f}%`
+🛑 ضرب وقف الخسارة: `{stops}` | `{stop_rate:.1f}%`
+
+🔧 *توصيات التحسين:*
+{chr(10).join(advice)}
+""".strip()
+
 
 # =========================================================
 # Telegram
@@ -543,7 +696,10 @@ def send_target_alert(trade, target_index, current_price):
 ✅ الهدف {target_no} تحقق بنجاح.
 """.strip()
 
-    return send_telegram(msg)
+    sent_ok = send_telegram(msg)
+    if sent_ok:
+        learning_mark_target(trade['display'], target_no)
+    return sent_ok
 
 def send_stop_loss_alert(trade, current_price):
     loss_pct = ((current_price - trade["entry"]) / trade["entry"]) * 100
@@ -564,7 +720,10 @@ def send_stop_loss_alert(trade, current_price):
 ⚠️ يفضل الالتزام بخطة إدارة المخاطر.
 """.strip()
 
-    return send_telegram(msg)
+    sent_ok = send_telegram(msg)
+    if sent_ok:
+        learning_mark_stop(trade['display'])
+    return sent_ok
 
 # =========================================================
 # Target Monitoring
@@ -681,6 +840,7 @@ def scan_market():
 
             if sent_ok:
                 register_active_trade(exchange, symbol, display, price, targets, stop_loss)
+                learning_register_signal(exchange, display, price, confidence, volume)
                 print(f"Signal sent: {exchange} {display} | Confidence: {confidence}%")
             else:
                 base = get_base_from_display(display)
@@ -708,6 +868,7 @@ def run_bot():
 • شروط 5M مرنة
 • الأهداف بالترتيب
 • منع تكرار نفس العملة لمدة ساعتين
+• تعلم ذاتي وتوصيات تحسين
 
 📊 المنصات:
 Gate • Bitget • OKX
@@ -729,6 +890,11 @@ Gate • Bitget • OKX
             monitor_active_targets()
             scan_market()
             monitor_active_targets()
+
+            global scan_rounds
+            scan_rounds += 1
+            if scan_rounds % LEARNING_REPORT_EVERY == 0:
+                send_telegram(build_learning_advice())
 
         except Exception as e:
             print("Scanner error:", e)
