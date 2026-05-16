@@ -47,6 +47,12 @@ EXCLUDED_KEYWORDS = [
     "PAXG", "XAUT", "ETF", "XSTOCK", "STOCK", "ON"
 ]
 
+# Leveraged tokens such as ACN3S, BTC3L, ETH5S
+LEVERAGED_SUFFIXES = (
+    "2L", "2S", "3L", "3S", "4L", "4S", "5L", "5S",
+    "BULL", "BEAR", "UP", "DOWN"
+)
+
 sent_signals = {}
 active_trades = {}
 
@@ -75,6 +81,9 @@ def is_excluded_base(base):
         return True
 
     if b.endswith("USD") or b.endswith("USDT") or b.endswith("USDC"):
+        return True
+
+    if b.endswith(LEVERAGED_SUFFIXES):
         return True
 
     for word in EXCLUDED_KEYWORDS:
