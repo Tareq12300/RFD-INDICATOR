@@ -5,9 +5,14 @@ import requests
 import pandas as pd
 from flask import Flask
 
+# =========================================================
+# Telegram Settings
+# =========================================================
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# مرن جدًا حتى يعطي تنبيهات كثيرة
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "50"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
@@ -15,11 +20,19 @@ MAX_SYMBOLS_PER_EXCHANGE = int(os.getenv("MAX_SYMBOLS_PER_EXCHANGE", "500"))
 
 ENABLED_EXCHANGES = ["GATE", "BITGET", "OKX"]
 
+# =========================================================
+# Flask Keep Alive
+# =========================================================
+
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "Flexible 3-Timeframe Crypto Bot is Running ✅"
+
+# =========================================================
+# Exclusions
+# =========================================================
 
 EXCLUDED_BASES = {
     "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "JUP", "SUI",
@@ -48,6 +61,10 @@ session.headers.update({
     "Accept": "application/json"
 })
 
+# =========================================================
+# Helpers
+# =========================================================
+
 def safe_get(url, params=None):
     r = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
@@ -59,60 +76,98 @@ def get_base_from_display(display):
 def is_excluded_base(base):
     if not base:
         return True
+
     b = base.upper().replace("-", "").replace("_", "")
+
     if b in EXCLUDED_BASES:
         return True
+
     if b.endswith("USD") or b.endswith("USDT") or b.endswith("USDC"):
         return True
+
     if b.endswith(LEVERAGED_SUFFIXES):
         return True
+
     for word in EXCLUDED_KEYWORDS:
         if word in b:
             return True
+
     return False
 
 def normalize_ohlcv(rows):
     if not rows or len(rows) < 50:
         return None
+
     df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
+
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
     df = df.dropna(subset=["time", "open", "high", "low", "close", "volume"])
     df = df.sort_values("time").reset_index(drop=True)
+
     if len(df) < 50:
         return None
+
     return df
 
-def send_telegram(message):
+# =========================================================
+# Telegram
+# =========================================================
+
+def send_telegram(message, use_markdown=True):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram variables missing")
         return False
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True
     }
+
+    if use_markdown:
+        payload["parse_mode"] = "Markdown"
+
     try:
         response = session.post(url, json=payload, timeout=10)
+
         if response.status_code == 200:
             return True
+
         print("Telegram send failed:", response.text)
+
+        # fallback بدون Markdown
+        if use_markdown:
+            payload.pop("parse_mode", None)
+            response = session.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                return True
+            print("Telegram fallback failed:", response.text)
+
         return False
+
     except Exception as e:
         print("Telegram error:", e)
         return False
 
+# =========================================================
+# Symbols
+# =========================================================
+
 def get_gate_symbols():
     data = safe_get("https://api.gateio.ws/api/v4/spot/currency_pairs")
     out = []
+
     for item in data:
         pair = item.get("id", "")
         base = item.get("base", "")
         quote = item.get("quote", "")
         trade_status = item.get("trade_status", "")
+
         if quote == "USDT" and trade_status == "tradable":
             if not is_excluded_base(base):
                 out.append({
@@ -121,16 +176,19 @@ def get_gate_symbols():
                     "base": base,
                     "display": f"{base}/USDT"
                 })
+
     return out[:MAX_SYMBOLS_PER_EXCHANGE]
 
 def get_bitget_symbols():
     data = safe_get("https://api.bitget.com/api/v2/spot/public/symbols")
     out = []
+
     for item in data.get("data", []):
         base = item.get("baseCoin", "")
         quote = item.get("quoteCoin", "")
         status = item.get("status", "")
         symbol = item.get("symbol", "")
+
         if quote == "USDT" and status == "online":
             if not is_excluded_base(base):
                 out.append({
@@ -139,16 +197,19 @@ def get_bitget_symbols():
                     "base": base,
                     "display": f"{base}/USDT"
                 })
+
     return out[:MAX_SYMBOLS_PER_EXCHANGE]
 
 def get_okx_symbols():
     data = safe_get("https://www.okx.com/api/v5/public/instruments", {"instType": "SPOT"})
     out = []
+
     for item in data.get("data", []):
         base = item.get("baseCcy", "")
         quote = item.get("quoteCcy", "")
         state = item.get("state", "")
         inst_id = item.get("instId", "")
+
         if quote == "USDT" and state == "live":
             if not is_excluded_base(base):
                 out.append({
@@ -157,6 +218,7 @@ def get_okx_symbols():
                     "base": base,
                     "display": f"{base}/USDT"
                 })
+
     return out[:MAX_SYMBOLS_PER_EXCHANGE]
 
 def get_all_symbols():
@@ -165,7 +227,9 @@ def get_all_symbols():
         "BITGET": get_bitget_symbols,
         "OKX": get_okx_symbols,
     }
+
     all_items = []
+
     for ex in ENABLED_EXCHANGES:
         try:
             items = funcs[ex]()
@@ -173,7 +237,12 @@ def get_all_symbols():
             all_items.extend(items)
         except Exception as e:
             print(f"{ex} symbols load failed: {e}")
+
     return all_items
+
+# =========================================================
+# Candles
+# =========================================================
 
 def get_gate_klines(symbol, interval, limit=220):
     data = safe_get("https://api.gateio.ws/api/v4/spot/candlesticks", {
@@ -181,9 +250,12 @@ def get_gate_klines(symbol, interval, limit=220):
         "interval": interval,
         "limit": limit
     })
+
     rows = []
     for x in data:
+        # Gate: [timestamp, volume, close, high, low, open]
         rows.append([x[0], x[5], x[3], x[4], x[2], x[1]])
+
     return normalize_ohlcv(rows)
 
 def get_bitget_klines(symbol, interval, limit=220):
@@ -192,14 +264,17 @@ def get_bitget_klines(symbol, interval, limit=220):
         "15m": "15min",
         "1h": "1h"
     }
+
     data = safe_get("https://api.bitget.com/api/v2/spot/market/candles", {
         "symbol": symbol,
         "granularity": granularity_map[interval],
         "limit": str(limit)
     })
+
     rows = []
     for x in data.get("data", []):
         rows.append([x[0], x[1], x[2], x[3], x[4], x[5]])
+
     return normalize_ohlcv(rows)
 
 def get_okx_klines(symbol, interval, limit=220):
@@ -208,24 +283,34 @@ def get_okx_klines(symbol, interval, limit=220):
         "15m": "15m",
         "1h": "1H"
     }
+
     data = safe_get("https://www.okx.com/api/v5/market/candles", {
         "instId": symbol,
         "bar": bar_map[interval],
         "limit": str(limit)
     })
+
     rows = []
     for x in data.get("data", []):
         rows.append([x[0], x[1], x[2], x[3], x[4], x[5]])
+
     return normalize_ohlcv(rows)
 
 def get_klines(exchange, symbol, interval, limit=220):
     if exchange == "GATE":
         return get_gate_klines(symbol, interval, limit)
+
     if exchange == "BITGET":
         return get_bitget_klines(symbol, interval, limit)
+
     if exchange == "OKX":
         return get_okx_klines(symbol, interval, limit)
+
     return None
+
+# =========================================================
+# Indicators
+# =========================================================
 
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -254,55 +339,107 @@ def stoch_rsi(df, period=14):
     d = k.rolling(3).mean()
     return k, d
 
+# =========================================================
+# Analysis - مرن جدًا للتنبيهات الكثيرة
+# =========================================================
+
 def analyze_1h(df):
+    """
+    الاتجاه العام مرن:
+    يكفي السعر فوق EMA200 أو EMA20 فوق EMA200.
+    """
     df = df.copy()
     df["ema20"] = ema(df["close"], 20)
     df["ema200"] = ema(df["close"], 200)
+
     last = df.iloc[-1]
-    return bool(last["close"] > last["ema200"] or last["ema20"] > last["ema200"])
+
+    return bool(
+        last["close"] > last["ema200"]
+        or last["ema20"] > last["ema200"]
+    )
 
 def analyze_15m(df):
+    """
+    مرن جدًا:
+    - Stoch RSI صاعد وليس فوق 90
+    - MACD يتحسن
+    - Volume يسمح حتى لو أقل من المتوسط
+    """
     _, _, hist = macd(df)
     k, d = stoch_rsi(df)
+
     if pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]) or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]):
         return False
+
     volume_now = df["volume"].iloc[-1]
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
+
     condition_stoch = k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 90
     condition_macd = hist.iloc[-1] > hist.iloc[-2]
     condition_volume = volume_now > volume_avg * 0.80
+
     return bool(condition_stoch and condition_macd and condition_volume)
 
 def analyze_5m(df):
+    """
+    دخول سريع مرن جدًا:
+    - EMA9 فوق EMA21
+    - السعر أعلى من إغلاق الشمعة السابقة
+    - MACD يتحسن
+    - Volume يسمح حتى لو أقل من المتوسط
+    - السعر لا يكون بعيد جدًا عن EMA9
+    """
     df = df.copy()
     df["ema9"] = ema(df["close"], 9)
     df["ema21"] = ema(df["close"], 21)
     _, _, hist = macd(df)
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
+
     volume_now = df["volume"].iloc[-1]
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
+
     distance_from_ema9 = (last["close"] - last["ema9"]) / last["ema9"]
+
     condition_ema = last["ema9"] > last["ema21"]
     condition_breakout = last["close"] > prev["close"]
     condition_macd = hist.iloc[-1] > hist.iloc[-2]
     condition_volume = volume_now > volume_avg * 0.80
     condition_not_late = distance_from_ema9 <= 0.08
-    return bool(condition_ema and condition_breakout and condition_macd and condition_volume and condition_not_late)
+
+    return bool(
+        condition_ema
+        and condition_breakout
+        and condition_macd
+        and condition_volume
+        and condition_not_late
+    )
 
 def calculate_confidence(df_1h, df_15m, df_5m):
     score = 0
+
     if analyze_1h(df_1h):
         score += 30
+
     if analyze_15m(df_15m):
         score += 30
+
     if analyze_5m(df_5m):
         score += 30
+
     vol_now = df_5m["volume"].iloc[-1]
     vol_avg = df_5m["volume"].rolling(20).mean().iloc[-1]
+
     if vol_now > vol_avg:
         score += 10
+
     return min(score, 100)
+
+# =========================================================
+# Targets
+# =========================================================
 
 def build_targets(price):
     return [
@@ -315,6 +452,10 @@ def build_targets(price):
 
 def build_stop_loss(price):
     return price * 0.985
+
+# =========================================================
+# Messages
+# =========================================================
 
 def format_message(exchange, display, price, confidence, volume, targets, stop_loss):
     return f"""
@@ -354,17 +495,21 @@ Volume مناسب ✅
 def can_send(exchange, symbol, display):
     base = get_base_from_display(display)
     now = time.time()
-    cooldown = 60 * 60 * 2
+    cooldown = 60 * 60 * 2  # منع التكرار ساعتين فقط
+
     if base not in active_bases:
         active_bases[base] = now
         return True
+
     if now - active_bases[base] > cooldown:
         active_bases[base] = now
         return True
+
     return False
 
 def register_active_trade(exchange, symbol, display, entry_price, targets, stop_loss):
     base = get_base_from_display(display)
+
     active_trades[base] = {
         "exchange": exchange,
         "symbol": symbol,
@@ -381,6 +526,7 @@ def send_target_alert(trade, target_index, current_price):
     target_price = trade["targets"][target_index]
     target_no = target_index + 1
     profit_pct = ((target_price - trade["entry"]) / trade["entry"]) * 100
+
     msg = f"""
 🎯 *تم تحقيق الهدف {target_no}*
 
@@ -396,10 +542,12 @@ def send_target_alert(trade, target_index, current_price):
 
 ✅ الهدف {target_no} تحقق بنجاح.
 """.strip()
+
     return send_telegram(msg)
 
 def send_stop_loss_alert(trade, current_price):
     loss_pct = ((current_price - trade["entry"]) / trade["entry"]) * 100
+
     msg = f"""
 🛑 *تم كسر وقف الخسارة*
 
@@ -415,84 +563,122 @@ def send_stop_loss_alert(trade, current_price):
 
 ⚠️ يفضل الالتزام بخطة إدارة المخاطر.
 """.strip()
+
     return send_telegram(msg)
+
+# =========================================================
+# Target Monitoring
+# =========================================================
 
 def monitor_active_targets():
     if not active_trades:
         return
+
     expired_keys = []
     max_trade_age = 60 * 60 * 24
+
     for base, trade in list(active_trades.items()):
         try:
             if time.time() - trade["created_at"] > max_trade_age:
                 expired_keys.append(base)
                 continue
+
             if trade.get("stopped"):
                 expired_keys.append(base)
                 continue
+
             df = get_klines(trade["exchange"], trade["symbol"], "5m", 50)
+
             if df is None or len(df) < 2:
                 continue
+
             current_price = float(df["close"].iloc[-1])
+
             if current_price <= trade["stop_loss"]:
                 sent_ok = send_stop_loss_alert(trade, current_price)
                 if sent_ok:
                     trade["stopped"] = True
                     expired_keys.append(base)
                 continue
+
+            # إرسال الأهداف بالترتيب
             while trade["next_target_index"] < len(trade["targets"]):
                 idx = trade["next_target_index"]
                 target_price = trade["targets"][idx]
+
                 if current_price >= target_price:
                     sent_ok = send_target_alert(trade, idx, current_price)
+
                     if sent_ok:
                         trade["next_target_index"] += 1
                         time.sleep(0.5)
                         continue
+
                     print(f"Target {idx + 1} send failed for {base}. Will retry later.")
                     break
+
                 break
+
             if trade["next_target_index"] >= len(trade["targets"]):
                 expired_keys.append(base)
+
         except Exception as e:
             print(f"Target monitor error for {base}: {e}")
             continue
+
     for base in expired_keys:
         active_bases.pop(base, None)
         active_trades.pop(base, None)
 
+# =========================================================
+# Scanner
+# =========================================================
+
 def scan_market():
     symbols = get_all_symbols()
     print(f"Total symbols: {len(symbols)}")
+
     for i, item in enumerate(symbols, start=1):
         exchange = item["exchange"]
         symbol = item["symbol"]
         display = item["display"]
+
         try:
             print(f"[{i}/{len(symbols)}] Analyze {exchange} {display}")
+
             df_1h = get_klines(exchange, symbol, "1h", 220)
             df_15m = get_klines(exchange, symbol, "15m", 220)
             df_5m = get_klines(exchange, symbol, "5m", 220)
+
             if df_1h is None or df_15m is None or df_5m is None:
                 continue
+
             if not analyze_1h(df_1h):
                 continue
+
             if not analyze_15m(df_15m):
                 continue
+
             if not analyze_5m(df_5m):
                 continue
+
             confidence = calculate_confidence(df_1h, df_15m, df_5m)
+
             if confidence < MIN_CONFIDENCE:
                 continue
+
             if not can_send(exchange, symbol, display):
                 print(f"Skip duplicate coin across exchanges: {display}")
                 continue
+
             price = float(df_5m["close"].iloc[-1])
             volume = float(df_5m["volume"].iloc[-1])
             targets = build_targets(price)
             stop_loss = build_stop_loss(price)
+
             msg = format_message(exchange, display, price, confidence, volume, targets, stop_loss)
             sent_ok = send_telegram(msg)
+
             if sent_ok:
                 register_active_trade(exchange, symbol, display, price, targets, stop_loss)
                 print(f"Signal sent: {exchange} {display} | Confidence: {confidence}%")
@@ -500,14 +686,20 @@ def scan_market():
                 base = get_base_from_display(display)
                 active_bases.pop(base, None)
                 print(f"Signal failed and was not registered: {exchange} {display}")
+
             time.sleep(0.5)
+
         except Exception as e:
             print(f"Error analyzing {exchange} {display}: {e}")
             continue
 
+# =========================================================
+# Run
+# =========================================================
+
 def run_bot():
-    send_telegram("""
-🚀 *بوت أبو علاوي المرن بدأ العمل*
+    welcome_message = """
+🚀 بوت أبو علاوي المرن بدأ العمل
 
 ✅ هذا الإصدار مخصص لإرسال تنبيهات كثيرة:
 • MIN_CONFIDENCE = 50
@@ -520,20 +712,33 @@ def run_bot():
 📊 المنصات:
 Gate • Bitget • OKX
 
-ابدأ راقب التنبيهات، وبعدها نشد الشروط حبة حبة.
-""".strip())
+⚡ البوت يعمل الآن ويبحث عن الفرص...
+"""
+
+    sent_ok = send_telegram(welcome_message, use_markdown=False)
+
+    if sent_ok:
+        print("Welcome message sent successfully")
+    else:
+        print("Welcome message failed")
+
+    time.sleep(3)
+
     while True:
         try:
             monitor_active_targets()
             scan_market()
             monitor_active_targets()
+
         except Exception as e:
             print("Scanner error:", e)
+
         print(f"Sleeping {SCAN_INTERVAL} seconds...")
         time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_bot, daemon=True)
     t.start()
+
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
