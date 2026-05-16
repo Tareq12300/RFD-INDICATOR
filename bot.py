@@ -7,19 +7,17 @@ from flask import Flask
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "90"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
 MAX_SYMBOLS_PER_EXCHANGE = int(os.getenv("MAX_SYMBOLS_PER_EXCHANGE", "500"))
-
 ENABLED_EXCHANGES = ["GATE", "BITGET", "OKX"]
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Strong Entry 3-Timeframe Bot is Running ✅"
+    return "Balanced Strong Entry 3-Timeframe Bot is Running ✅"
 
 EXCLUDED_BASES = {
     "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "JUP", "SUI",
@@ -28,25 +26,14 @@ EXCLUDED_BASES = {
     "TWT", "KCS", "LEO", "OKB", "CRO", "GT", "BGB", "MX",
     "GLDX", "PAXG", "XAUT"
 }
-
-EXCLUDED_KEYWORDS = [
-    "USD", "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD",
-    "PAXG", "XAUT", "ETF", "XSTOCK", "STOCK", "ON"
-]
-
-LEVERAGED_SUFFIXES = (
-    "2L", "2S", "3L", "3S", "4L", "4S", "5L", "5S",
-    "BULL", "BEAR", "UP", "DOWN"
-)
+EXCLUDED_KEYWORDS = ["USD", "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD", "PAXG", "XAUT", "ETF", "XSTOCK", "STOCK", "ON"]
+LEVERAGED_SUFFIXES = ("2L", "2S", "3L", "3S", "4L", "4S", "5L", "5S", "BULL", "BEAR", "UP", "DOWN")
 
 active_trades = {}
 active_bases = {}
 
 session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 CryptoSignalBot/1.0",
-    "Accept": "application/json"
-})
+session.headers.update({"User-Agent": "Mozilla/5.0 CryptoSignalBot/1.0", "Accept": "application/json"})
 
 def safe_get(url, params=None):
     r = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
@@ -80,21 +67,14 @@ def normalize_ohlcv(rows):
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
     df = df.dropna(subset=["time", "open", "high", "low", "close", "volume"])
     df = df.sort_values("time").reset_index(drop=True)
-    if len(df) < 50:
-        return None
-    return df
+    return df if len(df) >= 50 else None
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram variables missing")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
     try:
         response = session.post(url, json=payload, timeout=10)
         if response.status_code == 200:
@@ -214,18 +194,20 @@ def analyze_1h(df):
     return bool(last["close"] > last["ema200"] and last["ema20"] > last["ema200"])
 
 def analyze_15m(df):
+    """إعداد متوازن: خروج من التشبع تحت 25 + MACD يتحسن + Volume أعلى من المتوسط بـ 35%."""
     _, _, hist = macd(df)
     k, d = stoch_rsi(df)
     if pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]) or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]):
         return False
     volume_now = df["volume"].iloc[-1]
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
-    condition_stoch_early = k.iloc[-2] < 20 and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80
-    condition_macd_early = hist.iloc[-1] > hist.iloc[-2] and hist.iloc[-2] <= hist.iloc[-3]
-    condition_volume_strong = volume_now > volume_avg * 1.8
+    condition_stoch_early = k.iloc[-2] < 25 and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80
+    condition_macd_early = hist.iloc[-1] > hist.iloc[-2]
+    condition_volume_strong = volume_now > volume_avg * 1.35
     return bool(condition_stoch_early and condition_macd_early and condition_volume_strong)
 
 def analyze_5m(df):
+    """دخول سريع متوازن: اختراق + EMA + MACD + Volume + منع الدخول المتأخر."""
     df = df.copy()
     df["ema9"] = ema(df["close"], 9)
     df["ema21"] = ema(df["close"], 21)
@@ -236,11 +218,11 @@ def analyze_5m(df):
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
     distance_from_ema9 = (last["close"] - last["ema9"]) / last["ema9"]
     condition_ema = last["ema9"] > last["ema21"]
-    condition_first_breakout = last["close"] > prev["high"] and prev["close"] <= prev["ema9"]
+    condition_breakout = last["close"] > prev["high"]
     condition_macd = hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]
-    condition_volume = volume_now > volume_avg * 1.5
-    condition_not_late = distance_from_ema9 <= 0.025
-    return bool(condition_ema and condition_first_breakout and condition_macd and condition_volume and condition_not_late)
+    condition_volume = volume_now > volume_avg * 1.25
+    condition_not_late = distance_from_ema9 <= 0.035
+    return bool(condition_ema and condition_breakout and condition_macd and condition_volume and condition_not_late)
 
 def calculate_confidence(df_1h, df_15m, df_5m):
     score = 0
@@ -252,7 +234,7 @@ def calculate_confidence(df_1h, df_15m, df_5m):
         score += 25
     vol_now = df_5m["volume"].iloc[-1]
     vol_avg = df_5m["volume"].rolling(20).mean().iloc[-1]
-    if vol_now > vol_avg * 2:
+    if vol_now > vol_avg * 1.7:
         score += 5
     return min(score, 100)
 
@@ -264,7 +246,7 @@ def build_stop_loss(price):
 
 def format_message(exchange, display, price, confidence, volume, targets, stop_loss):
     return f"""
-🚀 *إشارة دخول قوية جداً - Long*
+🚀 *إشارة دخول قوية - Long*
 
 المنصة: `{exchange}`
 العملة: `{display}`
@@ -278,10 +260,10 @@ def format_message(exchange, display, price, confidence, volume, targets, stop_l
 🔥 الثقة:
 `{confidence}%`
 
-✅ *شروط الدخول الأقوى:*
+✅ *شروط الإشارة:*
 1H الاتجاه العام: صاعد ✅
-15M خروج مبكر من التشبع البيعي ✅
-5M أول اختراق قوي ✅
+15M خروج من التشبع البيعي ✅
+5M اختراق سريع ✅
 Volume قوي ✅
 الدخول غير متأخر ✅
 
@@ -454,13 +436,13 @@ def scan_market():
 
 def run_bot():
     send_telegram("""
-🚀 *مرحباً بك في بوت الدخول الأقوى - أبو علاوي*
+🚀 *مرحباً بك في بوت أبو علاوي للإشارات الذكية*
 
-✅ شروط البوت الجديدة:
+✅ الإعداد الحالي متوازن:
 • 1H اتجاه صاعد
-• 15M خروج مبكر من التشبع البيعي
-• 5M أول اختراق وليس دخول متأخر
-• Volume قوي
+• 15M خروج من التشبع البيعي تحت 25
+• 5M اختراق سريع
+• Volume أعلى من المتوسط
 • منع تكرار نفس العملة بين المنصات
 • تنبيهات الأهداف بالترتيب
 
