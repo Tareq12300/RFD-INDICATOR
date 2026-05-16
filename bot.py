@@ -7,17 +7,19 @@ from flask import Flask
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "90"))
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
+
+MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "50"))
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
 MAX_SYMBOLS_PER_EXCHANGE = int(os.getenv("MAX_SYMBOLS_PER_EXCHANGE", "500"))
+
 ENABLED_EXCHANGES = ["GATE", "BITGET", "OKX"]
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Balanced Strong Entry 3-Timeframe Bot is Running ✅"
+    return "Flexible 3-Timeframe Crypto Bot is Running ✅"
 
 EXCLUDED_BASES = {
     "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "JUP", "SUI",
@@ -26,14 +28,25 @@ EXCLUDED_BASES = {
     "TWT", "KCS", "LEO", "OKB", "CRO", "GT", "BGB", "MX",
     "GLDX", "PAXG", "XAUT"
 }
-EXCLUDED_KEYWORDS = ["USD", "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD", "PAXG", "XAUT", "ETF", "XSTOCK", "STOCK", "ON"]
-LEVERAGED_SUFFIXES = ("2L", "2S", "3L", "3S", "4L", "4S", "5L", "5S", "BULL", "BEAR", "UP", "DOWN")
+
+EXCLUDED_KEYWORDS = [
+    "USD", "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD",
+    "PAXG", "XAUT", "ETF", "XSTOCK", "STOCK", "ON"
+]
+
+LEVERAGED_SUFFIXES = (
+    "2L", "2S", "3L", "3S", "4L", "4S", "5L", "5S",
+    "BULL", "BEAR", "UP", "DOWN"
+)
 
 active_trades = {}
 active_bases = {}
 
 session = requests.Session()
-session.headers.update({"User-Agent": "Mozilla/5.0 CryptoSignalBot/1.0", "Accept": "application/json"})
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 CryptoSignalBot/1.0",
+    "Accept": "application/json"
+})
 
 def safe_get(url, params=None):
     r = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
@@ -67,14 +80,21 @@ def normalize_ohlcv(rows):
     df["time"] = pd.to_numeric(df["time"], errors="coerce")
     df = df.dropna(subset=["time", "open", "high", "low", "close", "volume"])
     df = df.sort_values("time").reset_index(drop=True)
-    return df if len(df) >= 50 else None
+    if len(df) < 50:
+        return None
+    return df
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram variables missing")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
     try:
         response = session.post(url, json=payload, timeout=10)
         if response.status_code == 200:
@@ -93,8 +113,14 @@ def get_gate_symbols():
         base = item.get("base", "")
         quote = item.get("quote", "")
         trade_status = item.get("trade_status", "")
-        if quote == "USDT" and trade_status == "tradable" and not is_excluded_base(base):
-            out.append({"exchange": "GATE", "symbol": pair, "base": base, "display": f"{base}/USDT"})
+        if quote == "USDT" and trade_status == "tradable":
+            if not is_excluded_base(base):
+                out.append({
+                    "exchange": "GATE",
+                    "symbol": pair,
+                    "base": base,
+                    "display": f"{base}/USDT"
+                })
     return out[:MAX_SYMBOLS_PER_EXCHANGE]
 
 def get_bitget_symbols():
@@ -105,8 +131,14 @@ def get_bitget_symbols():
         quote = item.get("quoteCoin", "")
         status = item.get("status", "")
         symbol = item.get("symbol", "")
-        if quote == "USDT" and status == "online" and not is_excluded_base(base):
-            out.append({"exchange": "BITGET", "symbol": symbol, "base": base, "display": f"{base}/USDT"})
+        if quote == "USDT" and status == "online":
+            if not is_excluded_base(base):
+                out.append({
+                    "exchange": "BITGET",
+                    "symbol": symbol,
+                    "base": base,
+                    "display": f"{base}/USDT"
+                })
     return out[:MAX_SYMBOLS_PER_EXCHANGE]
 
 def get_okx_symbols():
@@ -117,12 +149,22 @@ def get_okx_symbols():
         quote = item.get("quoteCcy", "")
         state = item.get("state", "")
         inst_id = item.get("instId", "")
-        if quote == "USDT" and state == "live" and not is_excluded_base(base):
-            out.append({"exchange": "OKX", "symbol": inst_id, "base": base, "display": f"{base}/USDT"})
+        if quote == "USDT" and state == "live":
+            if not is_excluded_base(base):
+                out.append({
+                    "exchange": "OKX",
+                    "symbol": inst_id,
+                    "base": base,
+                    "display": f"{base}/USDT"
+                })
     return out[:MAX_SYMBOLS_PER_EXCHANGE]
 
 def get_all_symbols():
-    funcs = {"GATE": get_gate_symbols, "BITGET": get_bitget_symbols, "OKX": get_okx_symbols}
+    funcs = {
+        "GATE": get_gate_symbols,
+        "BITGET": get_bitget_symbols,
+        "OKX": get_okx_symbols,
+    }
     all_items = []
     for ex in ENABLED_EXCHANGES:
         try:
@@ -134,20 +176,46 @@ def get_all_symbols():
     return all_items
 
 def get_gate_klines(symbol, interval, limit=220):
-    data = safe_get("https://api.gateio.ws/api/v4/spot/candlesticks", {"currency_pair": symbol, "interval": interval, "limit": limit})
-    rows = [[x[0], x[5], x[3], x[4], x[2], x[1]] for x in data]
+    data = safe_get("https://api.gateio.ws/api/v4/spot/candlesticks", {
+        "currency_pair": symbol,
+        "interval": interval,
+        "limit": limit
+    })
+    rows = []
+    for x in data:
+        rows.append([x[0], x[5], x[3], x[4], x[2], x[1]])
     return normalize_ohlcv(rows)
 
 def get_bitget_klines(symbol, interval, limit=220):
-    granularity_map = {"5m": "5min", "15m": "15min", "1h": "1h"}
-    data = safe_get("https://api.bitget.com/api/v2/spot/market/candles", {"symbol": symbol, "granularity": granularity_map[interval], "limit": str(limit)})
-    rows = [[x[0], x[1], x[2], x[3], x[4], x[5]] for x in data.get("data", [])]
+    granularity_map = {
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "1h"
+    }
+    data = safe_get("https://api.bitget.com/api/v2/spot/market/candles", {
+        "symbol": symbol,
+        "granularity": granularity_map[interval],
+        "limit": str(limit)
+    })
+    rows = []
+    for x in data.get("data", []):
+        rows.append([x[0], x[1], x[2], x[3], x[4], x[5]])
     return normalize_ohlcv(rows)
 
 def get_okx_klines(symbol, interval, limit=220):
-    bar_map = {"5m": "5m", "15m": "15m", "1h": "1H"}
-    data = safe_get("https://www.okx.com/api/v5/market/candles", {"instId": symbol, "bar": bar_map[interval], "limit": str(limit)})
-    rows = [[x[0], x[1], x[2], x[3], x[4], x[5]] for x in data.get("data", [])]
+    bar_map = {
+        "5m": "5m",
+        "15m": "15m",
+        "1h": "1H"
+    }
+    data = safe_get("https://www.okx.com/api/v5/market/candles", {
+        "instId": symbol,
+        "bar": bar_map[interval],
+        "limit": str(limit)
+    })
+    rows = []
+    for x in data.get("data", []):
+        rows.append([x[0], x[1], x[2], x[3], x[4], x[5]])
     return normalize_ohlcv(rows)
 
 def get_klines(exchange, symbol, interval, limit=220):
@@ -191,23 +259,21 @@ def analyze_1h(df):
     df["ema20"] = ema(df["close"], 20)
     df["ema200"] = ema(df["close"], 200)
     last = df.iloc[-1]
-    return bool(last["close"] > last["ema200"] and last["ema20"] > last["ema200"])
+    return bool(last["close"] > last["ema200"] or last["ema20"] > last["ema200"])
 
 def analyze_15m(df):
-    """إعداد متوازن: خروج من التشبع تحت 25 + MACD يتحسن + Volume أعلى من المتوسط بـ 35%."""
     _, _, hist = macd(df)
     k, d = stoch_rsi(df)
     if pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]) or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]):
         return False
     volume_now = df["volume"].iloc[-1]
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
-    condition_stoch_early = k.iloc[-2] < 25 and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80
-    condition_macd_early = hist.iloc[-1] > hist.iloc[-2]
-    condition_volume_strong = volume_now > volume_avg * 1.35
-    return bool(condition_stoch_early and condition_macd_early and condition_volume_strong)
+    condition_stoch = k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 90
+    condition_macd = hist.iloc[-1] > hist.iloc[-2]
+    condition_volume = volume_now > volume_avg * 0.80
+    return bool(condition_stoch and condition_macd and condition_volume)
 
 def analyze_5m(df):
-    """دخول سريع متوازن: اختراق + EMA + MACD + Volume + منع الدخول المتأخر."""
     df = df.copy()
     df["ema9"] = ema(df["close"], 9)
     df["ema21"] = ema(df["close"], 21)
@@ -218,35 +284,41 @@ def analyze_5m(df):
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
     distance_from_ema9 = (last["close"] - last["ema9"]) / last["ema9"]
     condition_ema = last["ema9"] > last["ema21"]
-    condition_breakout = last["close"] > prev["high"]
-    condition_macd = hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]
-    condition_volume = volume_now > volume_avg * 1.25
-    condition_not_late = distance_from_ema9 <= 0.035
+    condition_breakout = last["close"] > prev["close"]
+    condition_macd = hist.iloc[-1] > hist.iloc[-2]
+    condition_volume = volume_now > volume_avg * 0.80
+    condition_not_late = distance_from_ema9 <= 0.08
     return bool(condition_ema and condition_breakout and condition_macd and condition_volume and condition_not_late)
 
 def calculate_confidence(df_1h, df_15m, df_5m):
     score = 0
     if analyze_1h(df_1h):
-        score += 35
+        score += 30
     if analyze_15m(df_15m):
-        score += 35
+        score += 30
     if analyze_5m(df_5m):
-        score += 25
+        score += 30
     vol_now = df_5m["volume"].iloc[-1]
     vol_avg = df_5m["volume"].rolling(20).mean().iloc[-1]
-    if vol_now > vol_avg * 1.7:
-        score += 5
+    if vol_now > vol_avg:
+        score += 10
     return min(score, 100)
 
 def build_targets(price):
-    return [price * 1.015, price * 1.03, price * 1.05, price * 1.08, price * 1.12]
+    return [
+        price * 1.015,
+        price * 1.03,
+        price * 1.05,
+        price * 1.08,
+        price * 1.12
+    ]
 
 def build_stop_loss(price):
     return price * 0.985
 
 def format_message(exchange, display, price, confidence, volume, targets, stop_loss):
     return f"""
-🚀 *إشارة دخول قوية - Long*
+🚀 *إشارة دخول - Long*
 
 المنصة: `{exchange}`
 العملة: `{display}`
@@ -260,12 +332,11 @@ def format_message(exchange, display, price, confidence, volume, targets, stop_l
 🔥 الثقة:
 `{confidence}%`
 
-✅ *شروط الإشارة:*
-1H الاتجاه العام: صاعد ✅
-15M خروج من التشبع البيعي ✅
-5M اختراق سريع ✅
-Volume قوي ✅
-الدخول غير متأخر ✅
+✅ *شروط الإشارة المرنة:*
+1H الاتجاه العام: إيجابي ✅
+15M الزخم يتحسن ✅
+5M دخول سريع ✅
+Volume مناسب ✅
 
 🎯 *الأهداف:*
 1) `{targets[0]:.8f}`
@@ -283,7 +354,7 @@ Volume قوي ✅
 def can_send(exchange, symbol, display):
     base = get_base_from_display(display)
     now = time.time()
-    cooldown = 60 * 60 * 4
+    cooldown = 60 * 60 * 2
     if base not in active_bases:
         active_bases[base] = now
         return True
@@ -436,20 +507,20 @@ def scan_market():
 
 def run_bot():
     send_telegram("""
-🚀 *مرحباً بك في بوت أبو علاوي للإشارات الذكية*
+🚀 *بوت أبو علاوي المرن بدأ العمل*
 
-✅ الإعداد الحالي متوازن:
-• 1H اتجاه صاعد
-• 15M خروج من التشبع البيعي تحت 25
-• 5M اختراق سريع
-• Volume أعلى من المتوسط
-• منع تكرار نفس العملة بين المنصات
-• تنبيهات الأهداف بالترتيب
+✅ هذا الإصدار مخصص لإرسال تنبيهات كثيرة:
+• MIN_CONFIDENCE = 50
+• شروط Volume مرنة
+• شروط 15M مرنة
+• شروط 5M مرنة
+• الأهداف بالترتيب
+• منع تكرار نفس العملة لمدة ساعتين
 
 📊 المنصات:
 Gate • Bitget • OKX
 
-⚡ البوت بدأ العمل الآن.
+ابدأ راقب التنبيهات، وبعدها نشد الشروط حبة حبة.
 """.strip())
     while True:
         try:
