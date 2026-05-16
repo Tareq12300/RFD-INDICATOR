@@ -18,6 +18,24 @@ MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "50"))
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
 MAX_SYMBOLS_PER_EXCHANGE = int(os.getenv("MAX_SYMBOLS_PER_EXCHANGE", "500"))
+MIN_VOLUME_USD = float(os.getenv("MIN_VOLUME_USD", "500000"))
+
+TARGET1_PERCENT = float(os.getenv("TARGET1_PERCENT", "1.5"))
+TARGET2_PERCENT = float(os.getenv("TARGET2_PERCENT", "3"))
+TARGET3_PERCENT = float(os.getenv("TARGET3_PERCENT", "5"))
+TARGET4_PERCENT = float(os.getenv("TARGET4_PERCENT", "8"))
+TARGET5_PERCENT = float(os.getenv("TARGET5_PERCENT", "12"))
+
+STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", "1.5"))
+
+EMA_DISTANCE_LIMIT = float(os.getenv("EMA_DISTANCE_LIMIT", "0.08"))
+
+VOLUME_15M_RATIO = float(os.getenv("VOLUME_15M_RATIO", "0.80"))
+VOLUME_5M_RATIO = float(os.getenv("VOLUME_5M_RATIO", "0.80"))
+
+STOCH_MAX = float(os.getenv("STOCH_MAX", "90"))
+
+DUPLICATE_COOLDOWN_HOURS = int(os.getenv("DUPLICATE_COOLDOWN_HOURS", "2"))
 
 # Learning / performance tracking
 LEARNING_FILE = os.getenv("LEARNING_FILE", "signals_learning.json")
@@ -153,7 +171,7 @@ def save_learning_data(data):
     except Exception as e:
         print("Learning save error:", e)
 
-def learning_register_signal(exchange, display, entry, confidence, volume):
+def learning_register_signal(exchange, display, entry, confidence, volume, volume_usd=0):
     data = load_learning_data()
     data["summary"]["total_signals"] += 1
 
@@ -166,6 +184,7 @@ def learning_register_signal(exchange, display, entry, confidence, volume):
         "entry": entry,
         "confidence": confidence,
         "volume": volume,
+        "volume_usd": volume_usd,
         "created_at": int(time.time()),
         "target1": False,
         "target2": False,
@@ -528,9 +547,9 @@ def analyze_15m(df):
     volume_now = df["volume"].iloc[-1]
     volume_avg = df["volume"].rolling(20).mean().iloc[-1]
 
-    condition_stoch = k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 90
+    condition_stoch = k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < STOCH_MAX
     condition_macd = hist.iloc[-1] > hist.iloc[-2]
-    condition_volume = volume_now > volume_avg * 0.80
+    condition_volume = volume_now > volume_avg * VOLUME_15M_RATIO
 
     return bool(condition_stoch and condition_macd and condition_volume)
 
@@ -559,8 +578,8 @@ def analyze_5m(df):
     condition_ema = last["ema9"] > last["ema21"]
     condition_breakout = last["close"] > prev["close"]
     condition_macd = hist.iloc[-1] > hist.iloc[-2]
-    condition_volume = volume_now > volume_avg * 0.80
-    condition_not_late = distance_from_ema9 <= 0.08
+    condition_volume = volume_now > volume_avg * VOLUME_5M_RATIO
+    condition_not_late = distance_from_ema9 <= EMA_DISTANCE_LIMIT
 
     return bool(
         condition_ema
@@ -596,21 +615,21 @@ def calculate_confidence(df_1h, df_15m, df_5m):
 
 def build_targets(price):
     return [
-        price * 1.015,
-        price * 1.03,
-        price * 1.05,
-        price * 1.08,
-        price * 1.12
+        price * (1 + TARGET1_PERCENT / 100),
+        price * (1 + TARGET2_PERCENT / 100),
+        price * (1 + TARGET3_PERCENT / 100),
+        price * (1 + TARGET4_PERCENT / 100),
+        price * (1 + TARGET5_PERCENT / 100),
     ]
 
 def build_stop_loss(price):
-    return price * 0.985
+    return price * (1 - STOP_LOSS_PERCENT / 100)
 
 # =========================================================
 # Messages
 # =========================================================
 
-def format_message(exchange, display, price, confidence, volume, targets, stop_loss):
+def format_message(exchange, display, price, confidence, volume, volume_usd, targets, stop_loss):
     return f"""
 🚀 *إشارة دخول - Long*
 
@@ -620,7 +639,10 @@ def format_message(exchange, display, price, confidence, volume, targets, stop_l
 💰 السعر الحالي:
 `{price:.8f}`
 
-📊 Volume الحالي:
+📊 Volume الحالي بالدولار:
+`${volume_usd:,.0f}`
+
+📦 Volume العملة:
 `{volume:,.2f}`
 
 🔥 الثقة:
@@ -648,7 +670,7 @@ Volume مناسب ✅
 def can_send(exchange, symbol, display):
     base = get_base_from_display(display)
     now = time.time()
-    cooldown = 60 * 60 * 2  # منع التكرار ساعتين فقط
+    cooldown = 60 * 60 * DUPLICATE_COOLDOWN_HOURS  # منع التكرار ساعتين فقط
 
     if base not in active_bases:
         active_bases[base] = now
@@ -832,15 +854,21 @@ def scan_market():
 
             price = float(df_5m["close"].iloc[-1])
             volume = float(df_5m["volume"].iloc[-1])
+            volume_usd = volume * price
+
+            # فلتر أقل Volume بالدولار
+            if volume_usd < MIN_VOLUME_USD:
+                continue
+
             targets = build_targets(price)
             stop_loss = build_stop_loss(price)
 
-            msg = format_message(exchange, display, price, confidence, volume, targets, stop_loss)
+            msg = format_message(exchange, display, price, confidence, volume, volume_usd, targets, stop_loss)
             sent_ok = send_telegram(msg)
 
             if sent_ok:
                 register_active_trade(exchange, symbol, display, price, targets, stop_loss)
-                learning_register_signal(exchange, display, price, confidence, volume)
+                learning_register_signal(exchange, display, price, confidence, volume, volume_usd)
                 print(f"Signal sent: {exchange} {display} | Confidence: {confidence}%")
             else:
                 base = get_base_from_display(display)
@@ -862,13 +890,14 @@ def run_bot():
 🚀 بوت أبو علاوي المرن بدأ العمل
 
 ✅ هذا الإصدار مخصص لإرسال تنبيهات كثيرة:
-• MIN_CONFIDENCE = 50
+• MIN_CONFIDENCE قابل للتعديل
 • شروط Volume مرنة
 • شروط 15M مرنة
 • شروط 5M مرنة
 • الأهداف بالترتيب
 • منع تكرار نفس العملة لمدة ساعتين
 • تعلم ذاتي وتوصيات تحسين
+• أقل Volume بالدولار قابل للتعديل من MIN_VOLUME_USD
 
 📊 المنصات:
 Gate • Bitget • OKX
